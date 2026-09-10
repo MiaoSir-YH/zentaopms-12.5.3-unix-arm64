@@ -320,13 +320,17 @@ LIBDIR="$PREFIX/run/lib"
 mkdir -p "$LIBDIR"
 
 INTERP_SRC="$(readelf -l /bin/ls | sed -n 's/.*interpreter: \(.*\)]/\1/p' | head -n1)"
-INTERP_NAME="$(basename "$INTERP_SRC")"
-cp -a "$INTERP_SRC" "$LIBDIR/$INTERP_NAME"
+INTERP_SRC="$(readlink -f "$INTERP_SRC")"
+INTERP_NAME="ld-linux-aarch64.so.1"
+# Must copy the real loader file, not a symlink. A relative symlink under
+# /opt/zbox/run/lib would make every binary fail with "not found".
+cp -L "$INTERP_SRC" "$LIBDIR/$INTERP_NAME"
+chmod 755 "$LIBDIR/$INTERP_NAME"
 
 copy_needed() {
   local file="$1"
-  [[ -f "$file" && -e "$file" ]] || return 0
-  file "$file" 2>/dev/null | grep -q ELF || return 0
+  [[ -e "$file" ]] || return 0
+  file -L "$file" 2>/dev/null | grep -q ELF || return 0
   ldd "$file" 2>/dev/null | while IFS= read -r line; do
     if [[ "$line" != *"=>"* ]]; then
       continue
@@ -334,12 +338,11 @@ copy_needed() {
     local real
     real="$(echo "$line" | awk '{print $3}')"
     [[ -z "$real" || "$real" == "not" ]] && continue
-    [[ -f "$real" ]] || continue
+    [[ -e "$real" ]] || continue
     local base
     base="$(basename "$real")"
-    if [[ ! -e "$LIBDIR/$base" ]]; then
-      cp -a "$real" "$LIBDIR/$base"
-      # Follow one level of symlink content already copied via -a
+    if [[ ! -f "$LIBDIR/$base" ]]; then
+      cp -L "$real" "$LIBDIR/$base"
     fi
   done
 }
@@ -360,25 +363,27 @@ for nss in /lib/aarch64-linux-gnu/libnss_dns.so.2 \
            /lib/aarch64-linux-gnu/libnss_files.so.2 \
            /lib/aarch64-linux-gnu/libnss_compat.so.2 \
            /lib/aarch64-linux-gnu/libresolv.so.2; do
-  [[ -e "$nss" ]] && cp -a "$nss" "$LIBDIR/" || true
+  if [[ -e "$nss" ]]; then
+    cp -L "$nss" "$LIBDIR/$(basename "$nss")" || true
+  fi
 done
 
-strip_if_elf() {
-  local f="$1"
-  file "$f" 2>/dev/null | grep -q 'ELF' || return 0
-  strip --strip-debug "$f" 2>/dev/null || true
+is_loader() {
+  local n
+  n="$(basename "$1")"
+  [[ "$n" == ld-linux* || "$n" == ld-*.so* ]]
 }
 
-mapfile -t ALL_ELF < <(find "$PREFIX/run" -type f | sort)
+mapfile -t ALL_ELF < <(find "$PREFIX/run" \( -type f -o -type l \) | sort)
 for f in "${ALL_ELF[@]}"; do
-  file "$f" 2>/dev/null | grep -q ELF || continue
-  strip_if_elf "$f"
-  if file "$f" | grep -q 'ELF'; then
-    if file "$f" | grep -q 'executable\|interpreter\|shared object'; then
-      patchelf --set-interpreter "$LIBDIR/$INTERP_NAME" "$f" 2>/dev/null || true
-      patchelf --set-rpath "$LIBDIR" "$f" 2>/dev/null || true
-    fi
+  [[ -e "$f" ]] || continue
+  is_loader "$f" && continue
+  file -L "$f" 2>/dev/null | grep -q ELF || continue
+  strip --strip-debug "$f" 2>/dev/null || true
+  if readelf -l "$f" 2>/dev/null | grep -q 'Requesting program interpreter'; then
+    patchelf --set-interpreter "$LIBDIR/$INTERP_NAME" "$f" 2>/dev/null || true
   fi
+  patchelf --set-rpath "$LIBDIR" "$f" 2>/dev/null || true
 done
 
 # ---------------------------------------------------------------------------
@@ -443,10 +448,12 @@ sleep 2
 } > "$PREFIX/BUILD_INFO.txt"
 
 echo "==> Smoke binaries"
+ls -l "$LIBDIR/$INTERP_NAME" "$PREFIX/run/php/php" "$PREFIX/run/apache/httpd"
 file "$PREFIX/run/apache/httpd" "$PREFIX/run/php/php" "$PREFIX/run/mysql/mysqld"
-"$PREFIX/run/php/php" -v || true
-"$PREFIX/run/apache/httpd" -v || true
-"$PREFIX/run/mysql/mysqld" --version || "$PREFIX/run/mysql/mariadbd" --version || true
+readelf -l "$PREFIX/run/php/php" | grep interpreter || true
+"$PREFIX/run/php/php" -v
+"$PREFIX/run/apache/httpd" -v
+"$PREFIX/run/mysql/mysqld" --version || "$PREFIX/run/mysql/mariadbd" --version
 
 echo "==> Pack tarball"
 # Drop build caches from prefix if any
