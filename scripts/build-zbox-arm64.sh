@@ -246,14 +246,36 @@ if [[ ! -d "$PREFIX/data/mysql/mysql" ]]; then
 fi
 
 mkdir -p "$PREFIX/run/newmysql/share/english"
-cd "$MYSQL_BIN"
+# Leave the install tree before deleting it (cwd inside it breaks later starts).
+copy_mysql_bin() {
+  local name="$1"
+  local src=""
+  if [[ -e "$MYSQL_BIN/$name" ]]; then
+    src="$MYSQL_BIN/$name"
+  elif [[ -e "$MYSQL_BASE/$name" ]]; then
+    src="$MYSQL_BASE/$name"
+  else
+    return 0
+  fi
+  # Dereference so mysqld_safe -> mariadbd-safe becomes a real script.
+  cp -L "$src" "$PREFIX/run/newmysql/$name"
+}
 for b in my_print_defaults aria_chk mysql mysqld mysqld_safe mariadb mariadbd \
-         mysqldump myisamchk mariadb-install-db mysql_install_db; do
-  [[ -e "$b" ]] && cp -a "$b" "$PREFIX/run/newmysql/"
+         mariadbd-safe mysqldump myisamchk mariadb-install-db mysql_install_db; do
+  copy_mysql_bin "$b"
 done
+cd /
 # zbox.php greps for mariadbd
 if [[ ! -e "$PREFIX/run/newmysql/mariadbd" && -e "$PREFIX/run/newmysql/mysqld" ]]; then
   ln -s mysqld "$PREFIX/run/newmysql/mariadbd"
+fi
+if [[ ! -e "$PREFIX/run/newmysql/mysqld_safe" && -e "$PREFIX/run/newmysql/mariadbd-safe" ]]; then
+  cp -L "$PREFIX/run/newmysql/mariadbd-safe" "$PREFIX/run/newmysql/mysqld_safe"
+fi
+if [[ ! -x "$PREFIX/run/newmysql/mysqld_safe" ]]; then
+  echo "ERROR: mysqld_safe missing after flatten" >&2
+  ls -l "$PREFIX/run/newmysql"
+  exit 1
 fi
 cp -a "$ZBOX_SRC/mysql.server" "$PREFIX/run/newmysql/mysql.server"
 chmod a+x "$PREFIX/run/newmysql/mysql.server"
@@ -407,8 +429,15 @@ id nobody >/dev/null 2>&1 || useradd -g nogroup nobody
 chown -R nobody "$PREFIX/data/mysql"
 chmod -R 777 "$PREFIX/tmp" "$PREFIX/logs"
 
-"$PREFIX/run/mysql/mysql.server" start --defaults-file="$PREFIX/etc/mysql/my.cnf" || true
+cd /
+"$PREFIX/run/mysql/mysql.server" start --defaults-file="$PREFIX/etc/mysql/my.cnf"
 sleep 5
+if ! pgrep -f '/opt/zbox/run/mysql/mariadbd' >/dev/null && ! pgrep -f '/opt/zbox/run/mysql/mysqld' >/dev/null; then
+  echo "ERROR: MariaDB failed to start" >&2
+  ls -l "$PREFIX/run/mysql"
+  cat "$PREFIX/logs/mysql_error.log" || true
+  exit 1
+fi
 MYSQL="$PREFIX/run/mysql/mysql"
 if "$MYSQL" --defaults-file="$PREFIX/etc/mysql/my.cnf" -uroot -e "SELECT 1" >/dev/null 2>&1; then
   "$MYSQL" --defaults-file="$PREFIX/etc/mysql/my.cnf" -uroot < "$ZBOX_SRC/createuser.sql" || \
